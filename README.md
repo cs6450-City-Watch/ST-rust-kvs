@@ -23,6 +23,65 @@ The system consists of three main components:
 
 ## Usage
 
+### Makefile 
+
+### Clean all:
+
+Runs cargo clean
+
+```bash
+make clean
+```
+### Build all:
+
+Runs cargo build
+```bash
+make build
+```
+
+Or individually:
+
+```bash
+make build-server
+make build-coordinator
+make build-interface
+```
+
+### Run server
+
+Locally: 
+```bash
+# Two below are equivalent 
+make run-server 
+make run-server TARGET=localhost PORT=8080
+```
+
+On cluster:
+
+```bash
+make run-server TARGET=node0 PORT=8080
+```
+
+### Run coordinator
+
+Locally: 
+
+```bash
+make run-coordinator mode=localhost
+```
+
+On cluster:
+
+```bash
+make run-coordinator mode=cluster SERVER_BASE=node_num NUM_SERVERS=3
+```
+
+or 
+
+```bash
+make run-coordinator mode=single TARGET=192.168.1.100
+```
+
 ### Starting KVS Servers
 
 Start multiple server instances across your cluster:
