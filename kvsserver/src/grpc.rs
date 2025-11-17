@@ -106,7 +106,17 @@ impl SomeTime for LocalTimeService {
         let earliest = Some(Timestamp::from(current_time.earliest));
         let latest = Some(Timestamp::from(current_time.latest));
 
-        let interval = Interval { earliest, latest };
+        // TODO:
+        // `current_error_ns` and `sync_count` require some amount of state to be tracked for LocalTime.
+        // The trivial fix is of course to just declare this as `None`,
+        // but this doesn't account for any analytics for LocalTime.
+        // This should involve a discussion.
+        let interval = Interval {
+            earliest,
+            latest,
+            current_error_ns: None,
+            sync_count: None,
+        };
         Ok(Response::new(interval))
     }
 }
