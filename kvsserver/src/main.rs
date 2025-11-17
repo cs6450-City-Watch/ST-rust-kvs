@@ -16,6 +16,7 @@ use tarpc::{
 
 mod grpc;
 mod kvs;
+mod metrics;
 mod storage;
 
 use kvs::KvsServer;
@@ -62,6 +63,12 @@ struct Flags {
     /// Include the hostname/IP and/or port as needed
     #[clap(long, short, default_value_t = Address("localhost".into(), 50051))]
     sometime_host: Address<50051>,
+
+    /// Enable performance metrics reporting
+    ///
+    /// When enabled, prints operation rates (gets/s, puts/s, etc.) every second
+    #[clap(short, long)]
+    metrics: bool,
 }
 
 /// Helper function to spawn a future on the tokio runtime.
@@ -83,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
 
     let server_addr = (flags.listen_on.0, flags.listen_on.1);
     println!("listening on: {}:{}", server_addr.0, server_addr.1);
+
+    if flags.metrics {
+        tokio::spawn(metrics::start_metrics_reporting());
+    }
     let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?;
 
     listener.config_mut().max_frame_length(usize::MAX);
