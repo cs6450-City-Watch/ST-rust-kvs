@@ -1,3 +1,4 @@
 [submodule "kvsserver/protos"]
 	path = kvsserver/protos
 	url = git@github.com:cs6450-City-Watch/ST-protos.git
+    branch = main
