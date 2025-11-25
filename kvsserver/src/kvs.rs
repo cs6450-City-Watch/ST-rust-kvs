@@ -11,15 +11,15 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tarpc::context::Context;
+use tarpc::context::{self, Context};
 use tokio::time::sleep;
 
 use kvsinterface::{Kvs, KvsError, KvsResult};
 
 use crate::grpc::now;
 use crate::storage::{
-    TimeStampedEntry, deallocate_transaction, latest_before, latest_commit_lock, mark_read,
-    read_stamps, tx_timestamps, versions, write_aheads,
+    deallocate_transaction, latest_before, latest_commit_lock, mark_read, read_stamps,
+    tx_timestamps, versions, write_aheads,
 };
 
 /// Waits until the given timestamp has passed according to SomeTime semantics.
@@ -64,7 +64,7 @@ impl KvsReplica for KvsReplicator {
 /// Main KVS server implementation that handles distributed transactions.
 /// Each server instance is identified by its socket address.
 #[derive(Clone)]
-pub struct KvsServer(pub SocketAddr);
+pub struct KvsServer(pub SocketAddr, pub Option<KvsReplicaClient>);
 
 impl Kvs for KvsServer {
     /// Allocates all of the local information for this transaction.
@@ -195,6 +195,8 @@ impl Kvs for KvsServer {
             }
             //println!("tx_id: {:?} (after) version: {:?}", tx_id, this_version);
 
+            // TODO: cloning is definitely expensive, but I'm wanting to get a move on with this currently
+            self.append_version_to_remote(this_version.clone());
             versions.insert(time.latest, this_version);
             elapse(time.latest).await;
             /*
@@ -220,5 +222,17 @@ impl Kvs for KvsServer {
 
         deallocate_transaction(tx_id, ts);
         Ok(())
+    }
+}
+
+impl KvsServer {
+    async fn append_version_to_remote(self, version: DashMap<String, u64>) {
+        if let Some(rep) = self.1 {
+            let mut hm = HashMap::with_capacity(version.len());
+            for (key, val) in version.into_iter() {
+                hm.insert(key, val);
+            }
+            rep.append_version(context::current(), hm).await;
+        }
     }
 }

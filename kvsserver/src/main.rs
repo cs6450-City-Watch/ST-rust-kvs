@@ -10,6 +10,7 @@ use clap::Parser;
 use futures::{future, prelude::*};
 use kvsinterface::Kvs;
 use tarpc::{
+    client,
     server::{self, Channel, incoming::Incoming},
     tokio_serde::formats::Json,
 };
@@ -19,6 +20,8 @@ mod kvs;
 mod storage;
 
 use kvs::{KvsReplica, KvsReplicator, KvsServer};
+
+use crate::kvs::KvsReplicaClient;
 
 #[derive(Clone)]
 struct Address<const DEFAULT_PORT: u16>(String, u16);
@@ -78,7 +81,8 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
 // The next two functions could absolutely be reduced into something like a macro
 // where one of the terms is either KvsServer or KvsReplicator, but I am too tired for this voodoo rn
 
-async fn establish_client_listener(server_addr: (String, u16)) {
+// TODO: possibly change to keep Replica connection global, like the SomeTime connection
+async fn establish_client_listener(server_addr: (String, u16), rep: Option<KvsReplicaClient>) {
     let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default)
         .await
         .expect(&format!(
@@ -92,8 +96,8 @@ async fn establish_client_listener(server_addr: (String, u16)) {
         .map(server::BaseChannel::with_defaults)
         // limit channels to 1 per IP
         .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
-        .map(|channel| {
-            let server = KvsServer(channel.transport().peer_addr().unwrap());
+        .map(move |channel| {
+            let server = KvsServer(channel.transport().peer_addr().unwrap(), rep.clone());
             channel.execute(server.serve()).for_each(spawn)
         })
         .buffer_unordered(10)
@@ -142,19 +146,23 @@ async fn main() -> anyhow::Result<()> {
             let server_addr = (flags.listen_on.0, flags.listen_on.1);
             println!("listening for ops on: {}:{}", server_addr.0, server_addr.1);
             let partner_addr = (partner.0, partner.1);
-            println!(
-                "listening for replication on: {}:{}",
-                partner_addr.0, partner_addr.1
+            println!("replicating with: {}:{}", partner_addr.0, partner_addr.1);
+            let mut transport = tarpc::serde_transport::tcp::connect(
+                format!("{}:{}", partner_addr.0, partner_addr.1),
+                Json::default,
             );
+            transport.config_mut().max_frame_length(usize::MAX);
+            let rep_client =
+                KvsReplicaClient::new(client::Config::default(), transport.await?).spawn();
             tokio::join!(
-                establish_client_listener(server_addr),
+                establish_client_listener(server_addr, Some(rep_client)),
                 establish_replica_listener(partner_addr)
             );
         }
         None => {
             let server_addr = (flags.listen_on.0, flags.listen_on.1);
             println!("listening on: {}:{}", server_addr.0, server_addr.1);
-            establish_client_listener(server_addr).await;
+            establish_client_listener(server_addr, None).await;
         }
     }
 
