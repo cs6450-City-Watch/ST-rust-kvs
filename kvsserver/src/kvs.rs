@@ -4,7 +4,7 @@
 //! distributed timestamp management, and transaction coordination. It provides
 //! ACID properties for distributed transactions across multiple clients.
 
-use dashmap::Entry;
+use dashmap::{DashMap, Entry};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -36,7 +36,7 @@ pub async fn elapse(ts: SystemTime) {
 #[tarpc::service]
 pub trait KvsReplica {
     /// Appends entries to the replica log for replication purposes.
-    async fn append_entries(entries: Vec<TimeStampedEntry>) -> KvsResult<()>;
+    async fn append_version(version: HashMap<String, u64>) -> KvsResult<()>;
 }
 
 /// Replicator service implementation.
@@ -44,8 +44,20 @@ pub trait KvsReplica {
 pub struct KvsReplicator(pub SocketAddr);
 
 impl KvsReplica for KvsReplicator {
-    async fn append_entries(self, _: Context, _entries: Vec<TimeStampedEntry>) -> KvsResult<()> {
-        unimplemented!()
+    async fn append_version(self, _: Context, version: HashMap<String, u64>) -> KvsResult<()> {
+        let dm = DashMap::with_capacity(version.len());
+        for (key, val) in version.into_iter() {
+            dm.insert(key, val);
+        }
+        let lock = Arc::clone(&latest_commit_lock);
+        {
+            let _guard = lock.lock().await;
+            let time = now().await;
+            versions.insert(time.latest, dm);
+            elapse(time.latest).await;
+        }
+
+        Ok(())
     }
 }
 
@@ -183,9 +195,8 @@ impl Kvs for KvsServer {
             }
             //println!("tx_id: {:?} (after) version: {:?}", tx_id, this_version);
 
-            // TODO: the order here seems a little fucky. revisit.
-            elapse(time.latest).await;
             versions.insert(time.latest, this_version);
+            elapse(time.latest).await;
             /*
             println!(
                 "tx_id: {:?} releasing lock, timestamp: {:?}",

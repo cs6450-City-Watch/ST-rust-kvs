@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use kvsinterface::TransactionIdentifier;
 
+/* commenting out for now
 /// Represents a timestamped entry in the KVS for replication purposes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeStampedEntry {
@@ -22,6 +23,7 @@ pub struct TimeStampedEntry {
     /// The value being stored
     pub val: u64,
 }
+*/
 
 lazy_static! {
     /// Timestamped versions of the store for snapshot isolation.
