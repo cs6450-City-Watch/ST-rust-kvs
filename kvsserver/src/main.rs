@@ -18,7 +18,7 @@ mod grpc;
 mod kvs;
 mod storage;
 
-use kvs::KvsServer;
+use kvs::{KvsReplica, KvsReplicator, KvsServer};
 
 #[derive(Clone)]
 struct Address<const DEFAULT_PORT: u16>(String, u16);
@@ -62,6 +62,12 @@ struct Flags {
     /// Include the hostname/IP and/or port as needed
     #[clap(long, short, default_value_t = Address("localhost".into(), 50051))]
     sometime_host: Address<50051>,
+
+    /// Address of backup
+    ///
+    /// Include the hostname/IP and/or port as needed
+    #[clap(long, short)]
+    replica_partner: Option<Address<50052>>,
 }
 
 /// Helper function to spawn a future on the tokio runtime.
@@ -69,22 +75,16 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
 }
 
-/// Main entry point for the KVS server.
-///
-/// Establishes connection with SomeTime service, sets up the TCP listener,
-/// and handles incoming client connections with transaction support.
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let flags = Flags::parse();
+// The next two functions could absolutely be reduced into something like a macro
+// where one of the terms is either KvsServer or KvsReplicator, but I am too tired for this voodoo rn
 
-    let sometime_addr = format!("http://{}", flags.sometime_host);
-
-    println!("connecting to SomeTime service at: {sometime_addr}");
-
-    let server_addr = (flags.listen_on.0, flags.listen_on.1);
-    println!("listening on: {}:{}", server_addr.0, server_addr.1);
-    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?;
-
+async fn establish_client_listener(server_addr: (String, u16)) {
+    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default)
+        .await
+        .expect(&format!(
+            "unable to establish listener socket at specified port {}:{}",
+            server_addr.0, server_addr.1
+        ));
     listener.config_mut().max_frame_length(usize::MAX);
     listener
         // ignore failures
@@ -99,6 +99,64 @@ async fn main() -> anyhow::Result<()> {
         .buffer_unordered(10)
         .for_each(|_| async {})
         .await;
+}
+
+async fn establish_replica_listener(server_addr: (String, u16)) {
+    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default)
+        .await
+        .expect(&format!(
+            "unable to establish connection with replica at specified port {}:{}",
+            server_addr.0, server_addr.1
+        ));
+    listener.config_mut().max_frame_length(usize::MAX);
+    listener
+        // ignore failures
+        .filter_map(|r| future::ready(r.ok()))
+        .map(server::BaseChannel::with_defaults)
+        // limit channels to 1 per IP
+        .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
+        .map(|channel| {
+            let server = KvsReplicator(channel.transport().peer_addr().unwrap());
+            channel.execute(server.serve()).for_each(spawn)
+        })
+        .buffer_unordered(10)
+        .for_each(|_| async {})
+        .await;
+}
+
+/// Main entry point for the KVS server.
+///
+/// Establishes connection with SomeTime service, sets up the TCP listener for clients,
+/// establishes communication with backup,
+/// and handles incoming client connections with transaction support.
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let flags = Flags::parse();
+
+    let sometime_addr = format!("http://{}", flags.sometime_host);
+
+    println!("connecting to SomeTime service at: {sometime_addr}");
+
+    match flags.replica_partner {
+        Some(partner) => {
+            let server_addr = (flags.listen_on.0, flags.listen_on.1);
+            println!("listening for ops on: {}:{}", server_addr.0, server_addr.1);
+            let partner_addr = (partner.0, partner.1);
+            println!(
+                "listening for replication on: {}:{}",
+                partner_addr.0, partner_addr.1
+            );
+            tokio::join!(
+                establish_client_listener(server_addr),
+                establish_replica_listener(partner_addr)
+            );
+        }
+        None => {
+            let server_addr = (flags.listen_on.0, flags.listen_on.1);
+            println!("listening on: {}:{}", server_addr.0, server_addr.1);
+            establish_client_listener(server_addr).await;
+        }
+    }
 
     Ok(())
 }

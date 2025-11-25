@@ -41,7 +41,7 @@ pub trait KvsReplica {
 
 /// Replicator service implementation.
 #[derive(Clone)]
-pub struct KvsReplicator;
+pub struct KvsReplicator(pub SocketAddr);
 
 impl KvsReplica for KvsReplicator {
     async fn append_entries(self, _: Context, _entries: Vec<TimeStampedEntry>) -> KvsResult<()> {
