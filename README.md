@@ -161,13 +161,37 @@ Options:
 
 ### KVS Server
 ```
-Usage: kvsserver [OPTIONS]
+Usage: kvscoordinator [OPTIONS] <FILE_PATH>
+
+Arguments:
+  <FILE_PATH>  Path to file encoding operations.
 
 Options:
-  -l, --listen-on <LISTEN_ON>          The address for this KVS server to listen on [default: localhost:8080]
-  -s, --sometime-host <SOMETIME_HOST>  The address the SomeTime server is listening on [default: localhost:50051]
-  -h, --help                           Print help (see more with '--help')
+  -s, --server-base <SERVER_BASE>  Base of hostname on LAN for a server, e.g. the "node" in "node0" [default: node]
+  -n, --num-servers <NUM_SERVERS>  Number of servers/participants this coordinator is working with. [default: 1]
+  -p, --port-no <PORT_NO>          Port that this coordinator communicates with participants on. [default: 8080]
+  -l, --localhost                  Ignores other configuration like server_base, num_servers, etc and only works over the loopback
+  -i, --ip-addr <IP_ADDR>          Ignores other configuration and just directly connects to one IP address.
+  -h, --help                       Print help
 ```
+
+#### Performance Metrics
+
+When the `--metrics` flag is enabled, the KVS server will print performance statistics every second showing throughput rates for each operation type:
+
+```bash
+# Start server with metrics enabled
+cargo run -- --metrics
+```
+
+The metrics track:
+- **gets/s**: Read operations per second
+- **puts/s**: Write operations per second  
+- **ops/s**: Transaction begin operations per second
+- **commits/s**: Successful transaction commits per second
+- **aborts/s**: Failed transaction aborts per second
+
+Metrics calculate rates based on actual elapsed time between measurements.
 
 ## Prerequisites
 

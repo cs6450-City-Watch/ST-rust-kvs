@@ -17,6 +17,7 @@ use tokio::time::sleep;
 use kvsinterface::{Kvs, KvsError, KvsResult};
 
 use crate::grpc::now;
+use crate::metrics;
 use crate::storage::{
     deallocate_transaction, latest_before, latest_commit_lock, mark_read, read_stamps,
     tx_timestamps, versions, write_aheads,
@@ -76,6 +77,8 @@ impl Kvs for KvsServer {
     /// - write-ahead buffer (intermediate storage prior to commit-time for writes)
     /// - transaction read set (keys read by this transaction- makes it easier to manage dependencies)
     async fn begin(self, _: Context, tx_no: u64) -> KvsResult<()> {
+        metrics::increment_ops();
+
         // acquiring this entry is an implicit lock acquiring, at least for the moment.
         // remember: the ENTRY is being locked.
         let tx_id = (self.0, tx_no);
@@ -98,6 +101,8 @@ impl Kvs for KvsServer {
     /// 3. from the version, read the value for the key (if key doesn't map to a value, error)
     /// 4. mark the key as having been read and return the read value
     async fn get(self, _: Context, tx_no: u64, key: String) -> KvsResult<Option<u64>> {
+        metrics::increment_gets();
+
         let tx_id = (self.0, tx_no);
         match tx_timestamps.get(&tx_id) {
             None => Err(KvsError::TransactionDoesntExist(tx_id)),
@@ -125,6 +130,8 @@ impl Kvs for KvsServer {
     /// 3. mark value as read (effectively handles WAW dependencies)
     /// 4. insert the written kv pair in the write-ahead buffer
     async fn put(self, _: Context, tx_no: u64, key: String, val: u64) -> KvsResult<()> {
+        metrics::increment_puts();
+
         let tx_id = (self.0, tx_no);
         // check that we can write at all
         let tx_ts = match tx_timestamps.get(&tx_id) {
@@ -166,6 +173,8 @@ impl Kvs for KvsServer {
     /// 6. insert the version into readable versions (make visible, basically)
     /// 7. deallocate resources for the transaction
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
+        metrics::increment_commits();
+
         // invariant of ST timestamps monotonically increasing implies latest version -> version before now().earliest,
         // then copy all writes over, wait until now().latest, and commit
         let tx_id = (self.0, tx_no);
@@ -196,7 +205,7 @@ impl Kvs for KvsServer {
             //println!("tx_id: {:?} (after) version: {:?}", tx_id, this_version);
 
             // TODO: cloning is definitely expensive, but I'm wanting to get a move on with this currently
-            self.append_version_to_remote(this_version.clone());
+            self.append_version_to_remote(this_version.clone()).await;
             versions.insert(time.latest, this_version);
             elapse(time.latest).await;
             /*
@@ -214,6 +223,8 @@ impl Kvs for KvsServer {
 
     /// Deallocates resources for an unsuccessful transaction.
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
+        metrics::increment_aborts();
+
         let tx_id = (self.0, tx_no);
         let ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),

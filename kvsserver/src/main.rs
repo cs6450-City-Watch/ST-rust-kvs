@@ -17,6 +17,7 @@ use tarpc::{
 
 mod grpc;
 mod kvs;
+mod metrics;
 mod storage;
 
 use kvs::{KvsReplica, KvsReplicator, KvsServer};
@@ -71,6 +72,12 @@ struct Flags {
     /// Include the hostname/IP and/or port as needed
     #[clap(long, short)]
     replica_partner: Option<Address<50052>>,
+
+    /// Enable performance metrics reporting
+    ///
+    /// When enabled, prints operation rates (gets/s, puts/s, etc.) every second
+    #[clap(short, long)]
+    metrics: bool,
 }
 
 /// Helper function to spawn a future on the tokio runtime.
@@ -140,6 +147,10 @@ async fn main() -> anyhow::Result<()> {
     let sometime_addr = format!("http://{}", flags.sometime_host);
 
     println!("connecting to SomeTime service at: {sometime_addr}");
+
+    if flags.metrics {
+        tokio::spawn(metrics::start_metrics_reporting());
+    }
 
     match flags.replica_partner {
         Some(partner) => {
