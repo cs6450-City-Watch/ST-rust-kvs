@@ -17,6 +17,8 @@ use sometime::Interval;
 use sometime::some_time_client::SomeTimeClient;
 use sometime::some_time_server::SomeTime;
 
+use crate::grpc::sometime::NowRequest;
+
 /// Cached client connection to the SomeTime service
 /// `Channel`s are ultimately `tower::Buffer`s,
 /// which can be safely cloned and shared without additional overhead.
@@ -53,7 +55,7 @@ pub async fn now() -> SomeTimeTS {
     match get_sometime_client().await {
         Ok(client) => {
             // see `SOMETIME_CLIENT` doc comment.
-            match client.clone().now(()).await {
+            match client.clone().now(NowRequest { step: 0 }).await {
                 Ok(response) => {
                     let interval = response.into_inner();
 
@@ -100,7 +102,7 @@ pub struct LocalTimeService;
 #[tonic::async_trait]
 impl SomeTime for LocalTimeService {
     /// Returns the current timestamp as a SomeTime interval.
-    async fn now(&self, _request: Request<()>) -> Result<Response<Interval>, Status> {
+    async fn now(&self, _request: Request<NowRequest>) -> Result<Response<Interval>, Status> {
         let current_time = now().await;
 
         let earliest = Some(Timestamp::from(current_time.earliest));
