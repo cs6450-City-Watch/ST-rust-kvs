@@ -8,10 +8,14 @@ use dashmap::{DashMap, Entry};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
-use tarpc::context::{self, Context};
+use tarpc::{
+    client,
+    context::{self, Context},
+    tokio_serde::formats::Json,
+};
 use tokio::time::sleep;
 
 use kvsinterface::{Kvs, KvsError, KvsResult};
@@ -62,10 +66,33 @@ impl KvsReplica for KvsReplicator {
     }
 }
 
+// should be ignored if no replica specified
+pub static KVS_REPLICA: OnceLock<KvsReplicaClient> = OnceLock::new();
+
+/// Possibly a bit of a hacky approach, but we want to have a single connection started
+/// somewhat lazily, so the servers don't try to meet each other during their
+/// respective startups and then quit.
+async fn get_replica_client(rep: (String, u16)) -> &'static KvsReplicaClient {
+    if let Some(client) = KVS_REPLICA.get() {
+        return client;
+    }
+
+    let mut transport =
+        tarpc::serde_transport::tcp::connect(format!("{}:{}", rep.0, rep.1), Json::default);
+    transport.config_mut().max_frame_length(usize::MAX);
+    let client = KvsReplicaClient::new(client::Config::default(), transport.await.unwrap()).spawn();
+
+    KVS_REPLICA
+        .set(client)
+        .expect("something went wrong when setting the KVS replica.");
+
+    KVS_REPLICA.get().unwrap()
+}
+
 /// Main KVS server implementation that handles distributed transactions.
 /// Each server instance is identified by its socket address.
 #[derive(Clone)]
-pub struct KvsServer(pub SocketAddr, pub Option<KvsReplicaClient>);
+pub struct KvsServer(pub SocketAddr, pub Option<(String, u16)>);
 
 impl Kvs for KvsServer {
     /// Allocates all of the local information for this transaction.
@@ -239,11 +266,12 @@ impl Kvs for KvsServer {
 impl KvsServer {
     async fn append_version_to_remote(self, version: DashMap<String, u64>) {
         if let Some(rep) = self.1 {
+            let connection = get_replica_client(rep).await;
             let mut hm = HashMap::with_capacity(version.len());
             for (key, val) in version.into_iter() {
                 hm.insert(key, val);
             }
-            rep.append_version(context::current(), hm).await;
+            connection.append_version(context::current(), hm).await;
         }
     }
 }

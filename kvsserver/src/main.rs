@@ -70,6 +70,7 @@ struct Flags {
     /// Address of backup
     ///
     /// Include the hostname/IP and/or port as needed
+    /// Assumes both replicas use the same listening port
     #[clap(long, short)]
     replica_partner: Option<Address<50052>>,
 
@@ -89,7 +90,7 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
 // where one of the terms is either KvsServer or KvsReplicator, but I am too tired for this voodoo rn
 
 // TODO: possibly change to keep Replica connection global, like the SomeTime connection
-async fn establish_client_listener(server_addr: (String, u16), rep: Option<KvsReplicaClient>) {
+async fn establish_client_listener(server_addr: (String, u16), rep: Option<(String, u16)>) {
     let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default)
         .await
         .expect(&format!(
@@ -154,20 +155,15 @@ async fn main() -> anyhow::Result<()> {
 
     match flags.replica_partner {
         Some(partner) => {
+            let listener = flags.listen_on.clone();
             let server_addr = (flags.listen_on.0, flags.listen_on.1);
             println!("listening for ops on: {}:{}", server_addr.0, server_addr.1);
             let partner_addr = (partner.0, partner.1);
+            let partner_listener = (listener.0, partner_addr.1);
             println!("replicating with: {}:{}", partner_addr.0, partner_addr.1);
-            let mut transport = tarpc::serde_transport::tcp::connect(
-                format!("{}:{}", partner_addr.0, partner_addr.1),
-                Json::default,
-            );
-            transport.config_mut().max_frame_length(usize::MAX);
-            let rep_client =
-                KvsReplicaClient::new(client::Config::default(), transport.await?).spawn();
             tokio::join!(
-                establish_client_listener(server_addr, Some(rep_client)),
-                establish_replica_listener(partner_addr)
+                establish_client_listener(server_addr, Some(partner_addr.clone())),
+                establish_replica_listener(partner_listener)
             );
         }
         None => {
