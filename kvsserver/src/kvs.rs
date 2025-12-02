@@ -4,14 +4,18 @@
 //! distributed timestamp management, and transaction coordination. It provides
 //! ACID properties for distributed transactions across multiple clients.
 
-use dashmap::Entry;
+use dashmap::{DashMap, Entry};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
-use tarpc::context::Context;
+use tarpc::{
+    client,
+    context::{self, Context},
+    tokio_serde::formats::Json,
+};
 use tokio::time::sleep;
 
 use kvsinterface::{Kvs, KvsError, KvsResult};
@@ -19,8 +23,8 @@ use kvsinterface::{Kvs, KvsError, KvsResult};
 use crate::grpc::now;
 use crate::metrics;
 use crate::storage::{
-    TimeStampedEntry, deallocate_transaction, latest_before, latest_commit_lock, mark_read,
-    read_stamps, tx_timestamps, versions, write_aheads,
+    deallocate_transaction, latest_before, latest_commit_lock, mark_read, read_stamps,
+    tx_timestamps, versions, write_aheads,
 };
 
 /// Waits until the given timestamp has passed according to SomeTime semantics.
@@ -37,23 +41,58 @@ pub async fn elapse(ts: SystemTime) {
 #[tarpc::service]
 pub trait KvsReplica {
     /// Appends entries to the replica log for replication purposes.
-    async fn append_entries(entries: Vec<TimeStampedEntry>) -> KvsResult<()>;
+    async fn append_version(version: HashMap<String, u64>) -> KvsResult<()>;
 }
 
 /// Replicator service implementation.
 #[derive(Clone)]
-pub struct KvsReplicator;
+pub struct KvsReplicator(pub SocketAddr);
 
 impl KvsReplica for KvsReplicator {
-    async fn append_entries(self, _: Context, _entries: Vec<TimeStampedEntry>) -> KvsResult<()> {
-        unimplemented!()
+    async fn append_version(self, _: Context, version: HashMap<String, u64>) -> KvsResult<()> {
+        let dm = DashMap::with_capacity(version.len());
+        for (key, val) in version.into_iter() {
+            dm.insert(key, val);
+        }
+        let lock = Arc::clone(&latest_commit_lock);
+        {
+            let _guard = lock.lock().await;
+            let time = now().await;
+            versions.insert(time.latest, dm);
+            elapse(time.latest).await;
+        }
+
+        Ok(())
     }
+}
+
+// should be ignored if no replica specified
+pub static KVS_REPLICA: OnceLock<KvsReplicaClient> = OnceLock::new();
+
+/// Possibly a bit of a hacky approach, but we want to have a single connection started
+/// somewhat lazily, so the servers don't try to meet each other during their
+/// respective startups and then quit.
+async fn get_replica_client(rep: (String, u16)) -> &'static KvsReplicaClient {
+    if let Some(client) = KVS_REPLICA.get() {
+        return client;
+    }
+
+    let mut transport =
+        tarpc::serde_transport::tcp::connect(format!("{}:{}", rep.0, rep.1), Json::default);
+    transport.config_mut().max_frame_length(usize::MAX);
+    let client = KvsReplicaClient::new(client::Config::default(), transport.await.unwrap()).spawn();
+
+    KVS_REPLICA
+        .set(client)
+        .expect("something went wrong when setting the KVS replica.");
+
+    KVS_REPLICA.get().unwrap()
 }
 
 /// Main KVS server implementation that handles distributed transactions.
 /// Each server instance is identified by its socket address.
 #[derive(Clone)]
-pub struct KvsServer(pub SocketAddr);
+pub struct KvsServer(pub SocketAddr, pub Option<(String, u16)>);
 
 impl Kvs for KvsServer {
     /// Allocates all of the local information for this transaction.
@@ -192,9 +231,10 @@ impl Kvs for KvsServer {
             }
             //println!("tx_id: {:?} (after) version: {:?}", tx_id, this_version);
 
-            // TODO: the order here seems a little fucky. revisit.
-            elapse(time.latest).await;
+            // TODO: cloning is definitely expensive, but I'm wanting to get a move on with this currently
+            self.append_version_to_remote(this_version.clone()).await;
             versions.insert(time.latest, this_version);
+            elapse(time.latest).await;
             /*
             println!(
                 "tx_id: {:?} releasing lock, timestamp: {:?}",
@@ -220,5 +260,18 @@ impl Kvs for KvsServer {
 
         deallocate_transaction(tx_id, ts);
         Ok(())
+    }
+}
+
+impl KvsServer {
+    async fn append_version_to_remote(self, version: DashMap<String, u64>) {
+        if let Some(rep) = self.1 {
+            let connection = get_replica_client(rep).await;
+            let mut hm = HashMap::with_capacity(version.len());
+            for (key, val) in version.into_iter() {
+                hm.insert(key, val);
+            }
+            connection.append_version(context::current(), hm).await;
+        }
     }
 }

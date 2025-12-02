@@ -6,12 +6,13 @@
 
 use dashmap::{DashMap, DashSet};
 use lazy_static::lazy_static;
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use tokio::sync::Mutex;
 
 use kvsinterface::TransactionIdentifier;
 
+/* commenting out for now
 /// Represents a timestamped entry in the KVS for replication purposes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeStampedEntry {
@@ -22,6 +23,7 @@ pub struct TimeStampedEntry {
     /// The value being stored
     pub val: u64,
 }
+*/
 
 lazy_static! {
     /// Timestamped versions of the store for snapshot isolation.

@@ -10,6 +10,7 @@ use clap::Parser;
 use futures::{future, prelude::*};
 use kvsinterface::Kvs;
 use tarpc::{
+    client,
     server::{self, Channel, incoming::Incoming},
     tokio_serde::formats::Json,
 };
@@ -19,7 +20,9 @@ mod kvs;
 mod metrics;
 mod storage;
 
-use kvs::KvsServer;
+use kvs::{KvsReplica, KvsReplicator, KvsServer};
+
+use crate::kvs::KvsReplicaClient;
 
 #[derive(Clone)]
 struct Address<const DEFAULT_PORT: u16>(String, u16);
@@ -64,6 +67,13 @@ struct Flags {
     #[clap(long, short, default_value_t = Address("localhost".into(), 50051))]
     sometime_host: Address<50051>,
 
+    /// Address of backup
+    ///
+    /// Include the hostname/IP and/or port as needed
+    /// Assumes both replicas use the same listening port
+    #[clap(long, short)]
+    replica_partner: Option<Address<50052>>,
+
     /// Enable performance metrics reporting
     ///
     /// When enabled, prints operation rates (gets/s, puts/s, etc.) every second
@@ -76,9 +86,60 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
 }
 
+// The next two functions could absolutely be reduced into something like a macro
+// where one of the terms is either KvsServer or KvsReplicator, but I am too tired for this voodoo rn
+
+// TODO: possibly change to keep Replica connection global, like the SomeTime connection
+async fn establish_client_listener(server_addr: (String, u16), rep: Option<(String, u16)>) {
+    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default)
+        .await
+        .expect(&format!(
+            "unable to establish listener socket at specified port {}:{}",
+            server_addr.0, server_addr.1
+        ));
+    listener.config_mut().max_frame_length(usize::MAX);
+    listener
+        // ignore failures
+        .filter_map(|r| future::ready(r.ok()))
+        .map(server::BaseChannel::with_defaults)
+        // limit channels to 1 per IP
+        .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
+        .map(move |channel| {
+            let server = KvsServer(channel.transport().peer_addr().unwrap(), rep.clone());
+            channel.execute(server.serve()).for_each(spawn)
+        })
+        .buffer_unordered(10)
+        .for_each(|_| async {})
+        .await;
+}
+
+async fn establish_replica_listener(server_addr: (String, u16)) {
+    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default)
+        .await
+        .expect(&format!(
+            "unable to establish connection with replica at specified port {}:{}",
+            server_addr.0, server_addr.1
+        ));
+    listener.config_mut().max_frame_length(usize::MAX);
+    listener
+        // ignore failures
+        .filter_map(|r| future::ready(r.ok()))
+        .map(server::BaseChannel::with_defaults)
+        // limit channels to 1 per IP
+        .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
+        .map(|channel| {
+            let server = KvsReplicator(channel.transport().peer_addr().unwrap());
+            channel.execute(server.serve()).for_each(spawn)
+        })
+        .buffer_unordered(10)
+        .for_each(|_| async {})
+        .await;
+}
+
 /// Main entry point for the KVS server.
 ///
-/// Establishes connection with SomeTime service, sets up the TCP listener,
+/// Establishes connection with SomeTime service, sets up the TCP listener for clients,
+/// establishes communication with backup,
 /// and handles incoming client connections with transaction support.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -88,28 +149,29 @@ async fn main() -> anyhow::Result<()> {
 
     println!("connecting to SomeTime service at: {sometime_addr}");
 
-    let server_addr = (flags.listen_on.0, flags.listen_on.1);
-    println!("listening on: {}:{}", server_addr.0, server_addr.1);
-
     if flags.metrics {
         tokio::spawn(metrics::start_metrics_reporting());
     }
-    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?;
 
-    listener.config_mut().max_frame_length(usize::MAX);
-    listener
-        // ignore failures
-        .filter_map(|r| future::ready(r.ok()))
-        .map(server::BaseChannel::with_defaults)
-        // limit channels to 1 per IP
-        .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
-        .map(|channel| {
-            let server = KvsServer(channel.transport().peer_addr().unwrap());
-            channel.execute(server.serve()).for_each(spawn)
-        })
-        .buffer_unordered(10)
-        .for_each(|_| async {})
-        .await;
+    match flags.replica_partner {
+        Some(partner) => {
+            let listener = flags.listen_on.clone();
+            let server_addr = (flags.listen_on.0, flags.listen_on.1);
+            println!("listening for ops on: {}:{}", server_addr.0, server_addr.1);
+            let partner_addr = (partner.0, partner.1);
+            let partner_listener = (listener.0, partner_addr.1);
+            println!("replicating with: {}:{}", partner_addr.0, partner_addr.1);
+            tokio::join!(
+                establish_client_listener(server_addr, Some(partner_addr.clone())),
+                establish_replica_listener(partner_listener)
+            );
+        }
+        None => {
+            let server_addr = (flags.listen_on.0, flags.listen_on.1);
+            println!("listening on: {}:{}", server_addr.0, server_addr.1);
+            establish_client_listener(server_addr, None).await;
+        }
+    }
 
     Ok(())
 }
