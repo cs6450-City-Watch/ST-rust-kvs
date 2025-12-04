@@ -30,8 +30,12 @@ use crate::storage::{
 /// Waits until the given timestamp has passed according to SomeTime semantics.
 /// From the Spanner paper: waits until `now().earliest > commit_timestamp`.
 pub async fn elapse(ts: SystemTime) {
-    while now().await.earliest <= ts {
-        sleep(Duration::from_millis(100)).await;
+    loop {
+        let tt = now().await;
+        match ts.duration_since(tt.latest) {
+            Ok(remaining) => sleep(remaining).await,
+            Err(_) => break,
+        }
     }
 }
 
