@@ -13,7 +13,7 @@ def main():
     ops_per_transaction = int(sys.argv[3])
     get_proportion = float(sys.argv[4])  # e.g., 0.7 means 70% gets, 30% puts
 
-    keys = ["apple", "banana", "cherry", "date", "hello", "world"]
+    keys = ["apple", "banana", "cherry", "date", "hello", "world", "systems"]
     values = list(range(1, 101))
 
     with open(output_file, "w") as f:
